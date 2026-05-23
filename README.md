@@ -1,42 +1,30 @@
-# Welcome to Zammad
+# zammad-azure-deploy
 
-Are you juggling countless customer inquiries across multiple channels?
-Struggling to keep your support team on the same page?
-Or spending more time managing your helpdesk than delivering exceptional support to your customers?
+Bicep templates to deploy [Zammad](https://zammad.org) on Azure App Service
+with PostgreSQL Flexible Server and Azure Cache for Redis.
 
-Zammad is your Swiss Army knife - a web-based, open-source helpdesk and customer support platform
-packed with features to streamline customer communication across channels like email, chat, telephone and social media.
+- **Region:** Brazil South
+- **Subscription:** Microsoft Azure Sponsorship
+- **Resource group:** `zammad-app-brs-rg`
 
-## The Software
+## Stack
 
-The Zammad software is and will stay open source. It is licensed under the GNU AGPLv3.
-The source code is [available on GitHub](https://github.com/zammad/zammad) and owned by
-the [Zammad Foundation](https://zammad-foundation.org/), which is independent of commercial
-providers such as Zammad GmbH.
+| Resource | SKU | Monthly est. |
+|---|---|---|
+| App Service Plan (Linux B2) | B2 | ~$30 |
+| PostgreSQL Flexible Server | Burstable B1ms / PG15 | ~$26 |
+| Azure Cache for Redis | Basic C0 | ~$16 |
+| Web App | Docker container | included |
+| **Total** | | **~$72-85/mo** |
 
-## The Company - Zammad GmbH
+## Deploy
 
-The development of Zammad is carried out by the [amazing team of people](https://zammad.com/en/company)
-at [Zammad GmbH](https://zammad.com/) in collaboration with the community.
-We love to create open source software for you. If you want to ensure the Zammad software
-has a bright and sustainable future, consider becoming a Zammad customer!
+```bash
+az deployment sub create \
+  --location brazilsouth \
+  --template-file main.bicep \
+  --parameters postgresAdminPassword="<YOUR_PASSWORD>"
+```
 
-> Are you tired of complex setup, configuration, backup and update tasks? Let us handle this stuff for you! 🚀
->
-> The easiest and often most cost-effective way to operate Zammad is [our cloud service](https://zammad.com/en/pricing).
-> Give it a try with a [free trial instance](https://zammad.com/en/getting-started)!
-
-## Getting Started - Documentation
-
-[Learn more on Zammad’s documentation](https://docs.zammad.org/en/latest/install/docker-compose.html)
-
-## Upgrading
-
-For upgrading instructions, see our [Releases](https://github.com/zammad/zammad-docker-compose/releases).
-
-## Running without Elasticsearch
-
-Elasticsearch is an optional, but strongly recommended dependency for Zammad. More details can be found in the [documentation](https://docs.zammad.org/en/latest/prerequisites/software.html#elasticsearch-optional). There are however certain scenarios when running without Elasticsearch may be desired, e.g. for very small teams, for teams with limited budget or as a temporary solution for an unplanned Elasticsearch downtime or planned cluster upgrade.
-
-Elasticsearch is enabled by default in the example `docker-compose.yml` file. It is also by default required to run the "zammad-init" command. Disabling Elasticsearch is possible by setting a special environment variable: `ELASTICSEARCH_ENABLED=false` and loading
-the scenario [disable-elasticsearch-service.yml](scenarios/disable-elasticsearch-service.yml).
+See [CLAUDE.md](./CLAUDE.md) for full deployment instructions, troubleshooting,
+and guidance on adding the Zammad scheduler and websocket processes.
