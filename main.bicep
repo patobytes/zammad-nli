@@ -7,43 +7,33 @@ targetScope = 'subscription'
 @description('Azure region for all resources.')
 param location string = 'brazilsouth'
 
-@description('Name of the Zammad Web App (must be globally unique).')
-param zammadAppName string = 'zammad-brs-app'
+@description('Linux username for the Zammad VM.')
+param vmAdminUsername string = 'zammadadmin'
 
-@description('Name of the PostgreSQL Flexible Server (must be globally unique).')
-param postgresServerName string = 'zammad-pg-brs'
+@description('SSH public key content (paste the contents of your .pub file).')
+param sshPublicKey string
 
-@description('Name of the Azure Cache for Redis (must be globally unique).')
-param redisName string = 'zammad-redis-brs'
+@description('VM size. B2ms (2 vCPU / 8 GB) is the recommended minimum for Zammad.')
+param vmSize string = 'Standard_B2ms'
 
-@description('Name of the Linux App Service Plan that will host Zammad.')
-param linuxPlanName string = 'zammad-asp-brs'
-
-@description('PostgreSQL administrator username.')
-param postgresAdminUser string = 'zammadadmin'
+@description('Custom FQDN for Zammad (e.g. zammad.example.com). Leave empty to use the auto-generated Azure DNS label.')
+param zammadFqdn string = ''
 
 @secure()
-@description('PostgreSQL administrator password.')
-param postgresAdminPassword string
-
-// ─────────────────────────────────────────────
-// NOTE: cipp-srv-brs-asp is an ElasticPremium
-// Windows plan and cannot host Linux containers.
-// A dedicated Linux B2 plan is created instead,
-// inside zammad-app-brs-rg.
-// ─────────────────────────────────────────────
+@description('Password for the Zammad PostgreSQL database.')
+param postgresPassword string
 
 // ─────────────────────────────────────────────
 // Resource Group
 // ─────────────────────────────────────────────
 
 resource zammadRg 'Microsoft.Resources/resourceGroups@2021-04-01' = {
-  name: 'zammad-app-brs-rg'
+  name: 'rg-zmd-brs'
   location: location
 }
 
 // ─────────────────────────────────────────────
-// Deploy all Zammad resources into that RG
+// Zammad resources (VM, networking, storage)
 // ─────────────────────────────────────────────
 
 module zammad 'zammad.bicep' = {
@@ -51,12 +41,11 @@ module zammad 'zammad.bicep' = {
   scope: zammadRg
   params: {
     location: location
-    zammadAppName: zammadAppName
-    postgresServerName: postgresServerName
-    redisName: redisName
-    linuxPlanName: linuxPlanName
-    postgresAdminUser: postgresAdminUser
-    postgresAdminPassword: postgresAdminPassword
+    vmAdminUsername: vmAdminUsername
+    sshPublicKey: sshPublicKey
+    postgresPassword: postgresPassword
+    zammadFqdn: zammadFqdn
+    vmSize: vmSize
   }
 }
 
@@ -64,6 +53,8 @@ module zammad 'zammad.bicep' = {
 // Outputs
 // ─────────────────────────────────────────────
 
+output vmPublicIp string = zammad.outputs.vmPublicIp
+output vmFqdn string = zammad.outputs.vmFqdn
+output storageAccountName string = zammad.outputs.storageAccountName
+output sshCommand string = zammad.outputs.sshCommand
 output zammadUrl string = zammad.outputs.zammadUrl
-output postgresHost string = zammad.outputs.postgresHost
-output redisHost string = zammad.outputs.redisHost

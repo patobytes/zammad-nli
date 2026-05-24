@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem \"$env:USERPROFILE\\\\.ssh\\\\\" -ErrorAction SilentlyContinue | Select-Object Name)",
+      "PowerShell(ssh-keygen -t ed25519 -C \"zammad-azure\" -f \"$env:USERPROFILE\\\\.ssh\\\\zammad_azure\" -N '\"\"')",
+      "PowerShell(az vm extension list --resource-group rg-zmd-brs --vm-name vm-zmd-brs --query '[].name' -o tsv 2>&1)"
+    ]
+  }
+}

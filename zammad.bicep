@@ -3,206 +3,402 @@
 // ─────────────────────────────────────────────
 
 param location string
-param zammadAppName string
-param postgresServerName string
-param redisName string
-param linuxPlanName string
-param postgresAdminUser string
+param vmAdminUsername string
+param sshPublicKey string
+param vmSize string = 'Standard_B2ms'
+param zammadFqdn string = ''
 
 @secure()
-param postgresAdminPassword string
+param postgresPassword string
 
 // ─────────────────────────────────────────────
-// Linux App Service Plan (B2)
-// The existing cipp-srv-brs-asp is Windows/EP
-// and cannot host Linux containers.
-// B2 gives 2 vCPU + 3.5 GB RAM — Zammad minimum.
+// Azure Storage Account + File Shares
+// Provides data persistence independent of the
+// VM lifecycle. Zammad attachments and backups
+// survive VM deletion/recreation.
+// Equivalent to AWS EFS for this workload.
 // ─────────────────────────────────────────────
 
-resource appPlan 'Microsoft.Web/serverfarms@2022-09-01' = {
-  name: linuxPlanName
+var storageAccountName = take('stzmdbrs${uniqueString(resourceGroup().id)}', 24)
+
+resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
+  name: storageAccountName
   location: location
-  kind: 'linux'
-  sku: {
-    name: 'B2'
-    tier: 'Basic'
-  }
+  kind: 'StorageV2'
+  sku: { name: 'Standard_LRS' }
   properties: {
-    reserved: true   // required for Linux
+    minimumTlsVersion: 'TLS1_2'
+    allowBlobPublicAccess: false
+    supportsHttpsTrafficOnly: true
   }
 }
 
-// ─────────────────────────────────────────────
-// Azure Database for PostgreSQL Flexible Server
-// Burstable B1ms — sufficient for Zammad.
-// Upgrade to Standard_D2ds_v4 for heavy load.
-// ─────────────────────────────────────────────
-
-resource postgresServer 'Microsoft.DBforPostgreSQL/flexibleServers@2022-12-01' = {
-  name: postgresServerName
-  location: location
-  sku: {
-    name: 'Standard_B1ms'
-    tier: 'Burstable'
-  }
-  properties: {
-    version: '15'
-    administratorLogin: postgresAdminUser
-    administratorLoginPassword: postgresAdminPassword
-    storage: {
-      storageSizeGB: 32
-    }
-    backup: {
-      backupRetentionDays: 7
-      geoRedundantBackup: 'Disabled'
-    }
-    highAvailability: {
-      mode: 'Disabled'
-    }
-    authConfig: {
-      activeDirectoryAuth: 'Disabled'
-      passwordAuth: 'Enabled'
-    }
-  }
+resource fileService 'Microsoft.Storage/storageAccounts/fileServices@2023-01-01' = {
+  parent: storageAccount
+  name: 'default'
 }
 
-resource zammadDb 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2022-12-01' = {
-  parent: postgresServer
-  name: 'zammad_production'
-  properties: {
-    charset: 'UTF8'
-    collation: 'en_US.utf8'
-  }
+resource storageShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-01-01' = {
+  parent: fileService
+  name: 'zammad-storage'
+  properties: { shareQuota: 100 }
 }
 
-// Allow all Azure-sourced IPs to reach PostgreSQL
-// (0.0.0.0 → 0.0.0.0 is the Azure Services sentinel value)
-resource postgresFirewall 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2022-12-01' = {
-  parent: postgresServer
-  name: 'AllowAzureServices'
-  properties: {
-    startIpAddress: '0.0.0.0'
-    endIpAddress: '0.0.0.0'
-  }
+resource backupShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-01-01' = {
+  parent: fileService
+  name: 'zammad-backup'
+  properties: { shareQuota: 50 }
+}
+
+resource npmCertsShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-01-01' = {
+  parent: fileService
+  name: 'npm-certs'
+  properties: { shareQuota: 10 }
 }
 
 // ─────────────────────────────────────────────
-// Azure Cache for Redis (Basic C0)
-// Zammad uses Redis for Action Cable and jobs.
-// Upgrade to Standard C1 for HA.
+// Network Security Group
 // ─────────────────────────────────────────────
 
-resource redis 'Microsoft.Cache/redis@2023-08-01' = {
-  name: redisName
+resource nsg 'Microsoft.Network/networkSecurityGroups@2023-04-01' = {
+  name: 'nsg-zmd-brs'
   location: location
   properties: {
-    sku: {
-      name: 'Basic'
-      family: 'C'
-      capacity: 0
-    }
-    enableNonSslPort: false
-    minimumTlsVersion: '1.2'
+    securityRules: [
+      {
+        name: 'Allow-SSH'
+        properties: {
+          priority: 100
+          protocol: 'Tcp'
+          access: 'Allow'
+          direction: 'Inbound'
+          sourceAddressPrefix: '*'
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange: '22'
+        }
+      }
+      {
+        name: 'Allow-HTTP'
+        properties: {
+          priority: 110
+          protocol: 'Tcp'
+          access: 'Allow'
+          direction: 'Inbound'
+          sourceAddressPrefix: '*'
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange: '80'
+        }
+      }
+      {
+        name: 'Allow-HTTPS'
+        properties: {
+          priority: 120
+          protocol: 'Tcp'
+          access: 'Allow'
+          direction: 'Inbound'
+          sourceAddressPrefix: '*'
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange: '443'
+        }
+      }
+    ]
   }
 }
 
 // ─────────────────────────────────────────────
-// Zammad Web App (Linux container)
-// Image: ghcr.io/zammad/zammad:latest
-// Port: 3000 (Rails server)
-//
-// NOTE: This runs the Rails web server only.
-// Background scheduler + WebSocket server are
-// separate Zammad processes. For full
-// functionality deploy them as additional
-// Web Jobs or container instances, or
-// switch to Azure Container Apps.
+// VNet + Subnet
 // ─────────────────────────────────────────────
 
-var secretKeyBase = '${uniqueString(resourceGroup().id, zammadAppName)}${uniqueString(postgresServerName, redisName)}${uniqueString(location, subscription().subscriptionId)}'
-
-var databaseUrl = 'postgres://${postgresAdminUser}:${postgresAdminPassword}@${postgresServer.properties.fullyQualifiedDomainName}:5432/zammad_production?sslmode=require'
-
-var redisUrl = 'rediss://:${redis.listKeys().primaryKey}@${redis.properties.hostName}:6380/0'
-
-resource zammadApp 'Microsoft.Web/sites@2022-09-01' = {
-  name: zammadAppName
+resource vnet 'Microsoft.Network/virtualNetworks@2023-04-01' = {
+  name: 'vnet-zmd-brs'
   location: location
-  kind: 'app,linux,container'
   properties: {
-    serverFarmId: appPlan.id
-    httpsOnly: true
-    siteConfig: {
-      linuxFxVersion: 'DOCKER|ghcr.io/zammad/zammad:latest'
-      alwaysOn: true
-      webSocketsEnabled: true
-      http20Enabled: true
-      minTlsVersion: '1.2'
-      appSettings: [
-        // Container registry
-        {
-          name: 'DOCKER_REGISTRY_SERVER_URL'
-          value: 'https://ghcr.io'
+    addressSpace: { addressPrefixes: ['10.0.0.0/16'] }
+    subnets: [
+      {
+        name: 'snet-zmd-brs'
+        properties: {
+          addressPrefix: '10.0.1.0/24'
+          networkSecurityGroup: { id: nsg.id }
         }
-        {
-          name: 'DOCKER_ENABLE_CI'
-          value: 'false'
-        }
-        // Tell App Service which port the container listens on
-        {
-          name: 'WEBSITES_PORT'
-          value: '3000'
-        }
-        // Rails / Zammad core
-        {
-          name: 'RAILS_ENV'
-          value: 'production'
-        }
-        {
-          name: 'RAILS_LOG_TO_STDOUT'
-          value: 'true'
-        }
-        {
-          name: 'RAILS_SERVE_STATIC_FILES'
-          value: 'true'
-        }
-        {
-          name: 'SECRET_KEY_BASE'
-          value: secretKeyBase
-        }
-        // Database
-        {
-          name: 'DATABASE_URL'
-          value: databaseUrl
-        }
-        // Redis
-        {
-          name: 'REDIS_URL'
-          value: redisUrl
-        }
-        // Disable Elasticsearch (Zammad 6.x uses PG full-text as fallback)
-        {
-          name: 'ELASTICSEARCH_ENABLED'
-          value: 'false'
-        }
-        // Container logging
-        {
-          name: 'WEBSITES_ENABLE_APP_SERVICE_STORAGE'
-          value: 'false'
-        }
-      ]
+      }
+    ]
+  }
+}
+
+// ─────────────────────────────────────────────
+// Static Public IP
+// ─────────────────────────────────────────────
+
+resource pip 'Microsoft.Network/publicIPAddresses@2023-04-01' = {
+  name: 'pip-zmd-brs'
+  location: location
+  sku: { name: 'Standard' }
+  properties: {
+    publicIPAllocationMethod: 'Static'
+    dnsSettings: {
+      domainNameLabel: 'zmd-brs-${uniqueString(resourceGroup().id)}'
     }
   }
-  dependsOn: [
-    postgresServer
-    redis
-  ]
+}
+
+// ─────────────────────────────────────────────
+// Network Interface
+// ─────────────────────────────────────────────
+
+resource nic 'Microsoft.Network/networkInterfaces@2023-04-01' = {
+  name: 'nic-zmd-brs'
+  location: location
+  properties: {
+    ipConfigurations: [
+      {
+        name: 'ipconfig1'
+        properties: {
+          privateIPAllocationMethod: 'Dynamic'
+          publicIPAddress: { id: pip.id }
+          subnet: { id: '${vnet.id}/subnets/snet-zmd-brs' }
+        }
+      }
+    ]
+  }
+}
+
+// ─────────────────────────────────────────────
+// Virtual Machine
+// Standard_B2ms: 2 vCPU / 8 GB RAM
+// Ubuntu 22.04 LTS Gen2, 64 GB Premium SSD
+// Runs full Zammad stack via docker compose.
+// ─────────────────────────────────────────────
+
+resource vm 'Microsoft.Compute/virtualMachines@2023-03-01' = {
+  name: 'vm-zmd-brs'
+  location: location
+  properties: {
+    hardwareProfile: { vmSize: vmSize }
+    storageProfile: {
+      osDisk: {
+        createOption: 'FromImage'
+        diskSizeGB: 64
+        managedDisk: { storageAccountType: 'Premium_LRS' }
+      }
+      imageReference: {
+        publisher: 'canonical'
+        offer: '0001-com-ubuntu-server-jammy'
+        sku: '22_04-lts-gen2'
+        version: 'latest'
+      }
+    }
+    osProfile: {
+      computerName: 'vm-zmd-brs'
+      adminUsername: vmAdminUsername
+      linuxConfiguration: {
+        disablePasswordAuthentication: true
+        ssh: {
+          publicKeys: [
+            {
+              path: '/home/${vmAdminUsername}/.ssh/authorized_keys'
+              keyData: sshPublicKey
+            }
+          ]
+        }
+      }
+    }
+    networkProfile: {
+      networkInterfaces: [{ id: nic.id }]
+    }
+  }
+}
+
+// ─────────────────────────────────────────────
+// Custom Script Extension
+// Installs Docker, mounts Azure File Shares,
+// clones Zammad, and starts docker compose.
+// Secrets live only in protectedSettings
+// (encrypted at rest and in transit by ARM).
+// ─────────────────────────────────────────────
+
+var storageKey = storageAccount.listKeys().keys[0].value
+var effectiveFqdn = empty(zammadFqdn) ? pip.properties.dnsSettings.fqdn : zammadFqdn
+
+// scriptHeader uses Bicep interpolation to inject secrets.
+// scriptBody is a raw string — ${VAR} inside it is bash syntax, not Bicep.
+var scriptHeader = '#!/bin/bash\nset -euo pipefail\n\nSTORAGE_ACCOUNT="${storageAccountName}"\nSTORAGE_KEY="${storageKey}"\nSTORAGE_HOST="${storageAccountName}.file.${environment().suffixes.storage}"\nPOSTGRES_PASS="${postgresPassword}"\nZAMMAD_FQDN="${effectiveFqdn}"\nVM_ADMIN="${vmAdminUsername}"\n'
+
+var scriptBody = '''
+APP_DIR="/opt/zammad"
+LOG="/var/log/zammad-setup.log"
+exec >> "${LOG}" 2>&1
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Starting setup"
+
+# ── Docker ───────────────────────────────────────────────────────────────────
+DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+  ca-certificates curl gnupg cifs-utils git
+
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+. /etc/os-release
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" \
+  | tee /etc/apt/sources.list.d/docker.list > /dev/null
+DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+  docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+usermod -aG docker "${VM_ADMIN}"
+systemctl enable --now docker
+
+# Shared bridge — every service joins this; NPM Plus routes between them
+docker network create proxy-net 2>/dev/null || true
+
+# ── Azure File Shares (SMB 3.0, TLS in transit) ───────────────────────────────
+mkdir -p /mnt/zammad-storage /mnt/zammad-backup /mnt/npm-certs /etc/smbcredentials
+printf 'username=%s\npassword=%s\n' "${STORAGE_ACCOUNT}" "${STORAGE_KEY}" \
+  > /etc/smbcredentials/zammad.cred
+chmod 600 /etc/smbcredentials/zammad.cred
+
+grep -q "zammad-storage" /etc/fstab || cat >> /etc/fstab << FSTABEOF
+//${STORAGE_HOST}/zammad-storage /mnt/zammad-storage cifs credentials=/etc/smbcredentials/zammad.cred,vers=3.0,dir_mode=0777,file_mode=0777,serverino,nosuid,nodev,_netdev 0 0
+//${STORAGE_HOST}/zammad-backup  /mnt/zammad-backup  cifs credentials=/etc/smbcredentials/zammad.cred,vers=3.0,dir_mode=0777,file_mode=0777,serverino,nosuid,nodev,_netdev 0 0
+//${STORAGE_HOST}/npm-certs      /mnt/npm-certs      cifs credentials=/etc/smbcredentials/zammad.cred,vers=3.0,dir_mode=0777,file_mode=0777,serverino,nosuid,nodev,_netdev 0 0
+FSTABEOF
+mount -a
+
+# ── NPM Plus (reverse proxy + SSL) ───────────────────────────────────────────
+# Admin UI on localhost:81 only — access via: ssh -L 81:localhost:81 zammadadmin@<ip>
+# Default login: admin@example.com / changeme  (change immediately after first login)
+# SQLite DB stays on a local Docker volume (CIFS/SMB doesn't support SQLite locking).
+# /data/letsencrypt is mounted from Azure Files — certs survive VM recreations and
+# can be read by any other service that mounts /mnt/npm-certs.
+mkdir -p /opt/npm
+cat > /opt/npm/docker-compose.yml << 'NPMEOF'
+services:
+  npm:
+    image: ghcr.io/zoeyvid/npmplus:latest
+    container_name: npm
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "127.0.0.1:81:81"
+    volumes:
+      - npm-data:/data
+      - /mnt/npm-certs:/data/letsencrypt
+    environment:
+      - TZ=America/Sao_Paulo
+    networks:
+      - proxy-net
+
+volumes:
+  npm-data:
+
+networks:
+  proxy-net:
+    external: true
+NPMEOF
+docker compose -f /opt/npm/docker-compose.yml pull
+docker compose -f /opt/npm/docker-compose.yml up -d
+
+# ── Portainer CE (Docker management UI) ──────────────────────────────────────
+# Access via SSH tunnel: ssh -L 9000:localhost:9000 zammadadmin@<ip>
+# Or add a proxy host in NPM Plus pointing to portainer:9000
+mkdir -p /opt/portainer
+cat > /opt/portainer/docker-compose.yml << 'PORTAINEREOF'
+services:
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer-data:/data
+    networks:
+      - proxy-net
+
+volumes:
+  portainer-data:
+
+networks:
+  proxy-net:
+    external: true
+PORTAINEREOF
+docker compose -f /opt/portainer/docker-compose.yml pull
+docker compose -f /opt/portainer/docker-compose.yml up -d
+
+# ── Zammad ────────────────────────────────────────────────────────────────────
+# nginx binds localhost:8080 only; NPM Plus reaches it at http://zammad-nginx-1:80
+[ ! -d "${APP_DIR}/.git" ] && git clone https://github.com/zammad/zammad-docker-compose "${APP_DIR}"
+cd "${APP_DIR}"
+
+cat > .env << ENVEOF
+POSTGRES_PASS=${POSTGRES_PASS}
+NGINX_EXPOSE_PORT=127.0.0.1:8080
+TZ=America/Sao_Paulo
+ZAMMAD_HTTP_TYPE=http
+ZAMMAD_FQDN=${ZAMMAD_FQDN}
+ENVEOF
+
+cat > docker-compose.override.yml << 'OVERRIDEEOF'
+services:
+  zammad-nginx:
+    networks:
+      default: {}
+      proxy-net:
+        aliases:
+          - zammad-nginx-1
+
+volumes:
+  zammad-storage:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/zammad-storage
+  zammad-backup:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/zammad-backup
+
+networks:
+  proxy-net:
+    external: true
+OVERRIDEEOF
+
+docker compose pull
+docker compose up -d
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Setup complete"
+'''
+
+resource vmSetup 'Microsoft.Compute/virtualMachines/extensions@2023-03-01' = {
+  name: 'setup'
+  parent: vm
+  location: location
+  properties: {
+    publisher: 'Microsoft.Azure.Extensions'
+    type: 'CustomScript'
+    typeHandlerVersion: '2.1'
+    autoUpgradeMinorVersion: true
+    protectedSettings: {
+      script: base64('${scriptHeader}${scriptBody}')
+    }
+  }
+  dependsOn: [storageShare, backupShare, npmCertsShare]
 }
 
 // ─────────────────────────────────────────────
 // Outputs
 // ─────────────────────────────────────────────
 
-output zammadUrl string = 'https://${zammadApp.properties.defaultHostName}'
-output postgresHost string = postgresServer.properties.fullyQualifiedDomainName
-output redisHost string = redis.properties.hostName
+output vmPublicIp string = pip.properties.ipAddress
+output vmFqdn string = pip.properties.dnsSettings.fqdn
+output storageAccountName string = storageAccountName
+output sshCommand string = 'ssh ${vmAdminUsername}@${pip.properties.ipAddress}'
+output zammadUrl string = 'http://${effectiveFqdn}'

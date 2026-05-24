@@ -1,0 +1,41 @@
+# docker-compose.override.prod.yml
+# Azure production override — binds Docker volumes to Azure File Share mount points
+# and attaches the nginx container to the shared proxy-net network so NPM Plus
+# can route HTTPS traffic to Zammad.
+#
+# The Bicep deployment writes this as docker-compose.override.yml on the VM.
+# Docker Compose auto-loads docker-compose.override.yml, so no extra flags needed.
+#
+# DO NOT use this file directly on Proxmox/dev — those environments use local volumes.
+#
+# NPM Plus proxy host config (after first login at http://localhost:81):
+#   Domain:    your-fqdn.brazilsouth.cloudapp.azure.com
+#   Scheme:    http
+#   Hostname:  zammad-nginx-1
+#   Port:      80
+
+services:
+  zammad-nginx:
+    networks:
+      default: {}
+      proxy-net:
+        aliases:
+          - zammad-nginx-1
+
+volumes:
+  zammad-storage:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/zammad-storage
+  zammad-backup:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/zammad-backup
+
+networks:
+  proxy-net:
+    external: true
