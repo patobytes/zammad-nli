@@ -12,35 +12,40 @@ with Azure infrastructure, production overrides, and a multi-service setup layer
 
 ```mermaid
 graph LR
+    Browser["🌐 Browser"]
+
+    subgraph azure["☁️ Azure · Brazil South"]
+        subgraph vm["🖥️ vm-zmd-brs · Standard_B2ms"]
+            subgraph proxy-net["proxy-net · 172.20.0.0/24"]
+                NPM["🔀 NPM Plus\n:80 :443  localhost:81"]
+                Portainer["🐳 Portainer CE\nlocalhost:9000"]
+                ZNginx["⚙️ zammad-nginx\nzammad-nginx-1:80"]
+            end
+
+            subgraph gl1["🔒 gl-tenant1-net · 172.21.1.0/24"]
+                GL1["🕵️ globaleaks-tenant1"]
+            end
+
+            subgraph gl2["🔒 gl-tenant2-net · 172.21.2.0/24"]
+                GL2["🕵️ globaleaks-tenant2 · …"]
+            end
+
+            subgraph zstack["🐳 Zammad default bridge"]
+                ZApp["🎫 zammad (Rails)"]
+                PG["🗄️ postgresql"]
+                Redis["⚡ redis"]
+                ES["🔍 elasticsearch"]
+            end
+        end
+
+        subgraph afs["🗂️ Azure File Shares · stzmdbrsvi7puq3ozfbso"]
+            FS1["📁 zammad-storage  100 GB"]
+            FS2["💾 zammad-backup   50 GB"]
+            FS3["🔐 npm-certs       10 GB"]
+        end
+    end
+
     Browser -->|"HTTPS 443"| NPM
-
-    subgraph proxy-net["proxy-net · 172.20.0.0/24"]
-        NPM["NPM Plus\n:80 :443\nlocalhost:81"]
-        Portainer["Portainer CE\nlocalhost:9000"]
-        ZNginx["zammad-nginx\nzammad-nginx-1:80"]
-    end
-
-    subgraph gl1["gl-tenant1-net · 172.21.1.0/24"]
-        GL1["globaleaks-tenant1"]
-    end
-
-    subgraph gl2["gl-tenant2-net · 172.21.2.0/24"]
-        GL2["globaleaks-tenant2 · …"]
-    end
-
-    subgraph zstack["Zammad default bridge"]
-        ZApp["zammad (Rails)"]
-        PG["postgresql"]
-        Redis["redis"]
-        ES["elasticsearch"]
-    end
-
-    subgraph afs["Azure File Shares · stzmdbrsvi7puq3ozfbso"]
-        FS1["zammad-storage  100 GB"]
-        FS2["zammad-backup   50 GB"]
-        FS3["npm-certs       10 GB"]
-    end
-
     NPM -->|http| ZNginx
     NPM -->|"hot-connected\nper tenant"| GL1 & GL2
     ZNginx --> ZApp
