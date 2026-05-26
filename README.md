@@ -20,8 +20,12 @@ graph LR
         ZNginx["zammad-nginx\nzammad-nginx-1:80"]
     end
 
-    subgraph gl-net["globaleaks-net · 172.21.0.0/24  (planned)"]
-        GL["GlobaLeaks"]
+    subgraph gl1["gl-tenant1-net · 172.21.1.0/24"]
+        GL1["globaleaks-tenant1"]
+    end
+
+    subgraph gl2["gl-tenant2-net · 172.21.2.0/24"]
+        GL2["globaleaks-tenant2 · …"]
     end
 
     subgraph zstack["Zammad default bridge"]
@@ -38,14 +42,14 @@ graph LR
     end
 
     NPM -->|http| ZNginx
-    NPM -.->|"attach npm to gl-net first"| GL
+    NPM -->|"hot-connected\nper tenant"| GL1 & GL2
     ZNginx --> ZApp
     ZApp --> PG & Redis & ES
     ZApp -. "CIFS/SMB 3.0" .-> FS1 & FS2
     NPM -. "CIFS/SMB 3.0" .-> FS3
 ```
 
-NPM Plus is the single internet-facing entry point (ports 80/443). All other services are reachable only through NPM Plus or via SSH tunnel.
+NPM Plus is the single internet-facing entry point. GlobaLeaks tenants are deployed with [`scripts/globaleaks-add-tenant.sh`](scripts/globaleaks-add-tenant.sh), which auto-allocates a subnet and hot-connects NPM Plus without a restart.
 
 ---
 
@@ -54,22 +58,22 @@ NPM Plus is the single internet-facing entry point (ports 80/443). All other ser
 | Network | Subnet | Services |
 |---|---|---|
 | `proxy-net` | `172.20.0.0/24` | NPM Plus, Portainer, zammad-nginx |
-| `globaleaks-net` | `172.21.0.0/24` | GlobaLeaks (isolated from proxy-net) |
+| `gl-<tenant>-net` | `172.21.<n>.0/24` | One per GlobaLeaks tenant (isolated) |
 | Zammad default | Docker-assigned | zammad, postgresql, redis, elasticsearch |
 
-Both networks are pre-created by `vm-setup.sh` with explicit subnets. Services reference them as `external: true`.
+`proxy-net` is pre-created by `vm-setup.sh`. Tenant networks are created on demand by `globaleaks-add-tenant.sh`, starting at `172.21.1.0/24` and incrementing. All compose files reference them as `external: true`.
 
-**Isolation rule:** services on `globaleaks-net` cannot communicate with services on `proxy-net`. NPM Plus must be explicitly attached to a service's network to route traffic to it.
+**Isolation rule:** tenant networks have no path to `proxy-net` or to each other. NPM Plus is hot-connected to each new tenant network via `docker network connect` — no restart needed.
 
 ---
 
 ## Services
 
-| Directory | Service | Network |
+| Path | Service | Network |
 |---|---|---|
 | [`services/npm/`](services/npm/) | NPM Plus — reverse proxy + SSL | proxy-net |
 | [`services/portainer/`](services/portainer/) | Portainer CE — Docker UI | proxy-net |
-| [`services/globaleaks/`](services/globaleaks/) | GlobaLeaks (planned) | globaleaks-net |
+| [`services/globaleaks/`](services/globaleaks/) | GlobaLeaks — **template** (per-tenant) | gl-\<tenant\>-net |
 | repo root | Zammad (upstream docker-compose) | proxy-net (nginx only) |
 
 ---

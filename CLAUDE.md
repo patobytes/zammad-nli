@@ -14,22 +14,24 @@ Internet → NSG (22/80/443) → VM
                                ├── NPM Plus          :80/:443         reverse proxy + SSL  (proxy-net)
                                ├── Zammad nginx      localhost:8080   via proxy-net only
                                ├── Portainer CE      localhost:9000   via SSH tunnel / proxy-net
-                               └── GlobaLeaks (planned)               isolated on globaleaks-net
+                               └── GlobaLeaks tenant-n              isolated on gl-<tenant>-net
 ```
 
-NPM Plus is the single internet-facing entry point. Services that must be isolated from each other get their own Docker network; NPM Plus attaches to each network it needs to route to.
+NPM Plus is the single internet-facing entry point. Services that must be isolated get their own Docker network; NPM Plus hot-connects to each one via `docker network connect` (no restart needed).
 
 ### Docker networks
 
 | Network | Subnet | Services |
 |---|---|---|
 | `proxy-net` | `172.20.0.0/24` | NPM Plus, Portainer, zammad-nginx |
-| `globaleaks-net` | `172.21.0.0/24` | GlobaLeaks (isolated from proxy-net) |
+| `gl-<tenant>-net` | `172.21.<n>.0/24` | One GlobaLeaks instance per tenant |
 | Zammad default | Docker-assigned | zammad, postgresql, redis, elasticsearch |
 
-Both named networks are pre-created by `vm-setup.sh` with explicit subnets so IPAM assignments are stable. All compose files reference them as `external: true`. To add IPAM later, recreate with `docker network rm <name> && docker network create --driver bridge --subnet <cidr> <name>` (requires restarting affected containers).
+`proxy-net` is pre-created by `vm-setup.sh`. Tenant networks are created on demand by `scripts/globaleaks-add-tenant.sh`, auto-incrementing the third octet starting at 1 (`172.21.1.0/24`, `172.21.2.0/24`, …). All compose files reference them as `external: true`.
 
-**Isolation rule:** services on `globaleaks-net` cannot reach services on `proxy-net` and vice versa. To route traffic from NPM Plus to a service on an isolated network, add that network to NPM Plus's compose file and `docker compose up -d` it.
+**Isolation rule:** tenant networks have no path to `proxy-net` or to each other. Tenants can only be reached through NPM Plus, which is hot-connected to each new tenant network on deploy.
+
+To add IPAM config to an existing named network: `docker network rm <name> && docker network create --driver bridge --subnet <cidr> <name>`, then restart affected containers.
 
 ### Services directory
 
@@ -187,20 +189,37 @@ networks:
 
 Then in NPM Plus: add a proxy host pointing to `myservice:<port>`.
 
-### Option B — isolated network (service cannot see Zammad)
+### Option B — isolated network (service cannot see Zammad or other tenants)
 
-Use this for sensitive services like GlobaLeaks. See `services/globaleaks/docker-compose.yml` as the template.
+Use this for sensitive services. GlobaLeaks is the primary example — each tenant gets a completely isolated network.
 
-1. The isolated network is pre-created by `vm-setup.sh` (add it there if it doesn't exist yet):
+**For GlobaLeaks specifically**, use the dedicated script:
+
+```bash
+sudo bash /opt/scripts/globaleaks-add-tenant.sh <tenant-slug>
+```
+
+This auto-allocates the next `172.21.<n>.0/24`, creates the network, deploys the container, and hot-connects NPM Plus. Then add a proxy host in NPM Plus pointing to `globaleaks-<tenant>:8083`.
+
+**For other isolated services**, follow this pattern:
+
+1. Create the network with a new /24 (pick the next free third-octet):
    ```bash
-   docker network create --driver bridge --subnet 172.2X.0.0/24 <name>-net 2>/dev/null || true
+   docker network create --driver bridge --subnet 172.2X.<n>.0/24 <name>-net
    ```
-2. Create `services/<name>/docker-compose.yml` with `networks: <name>-net: external: true`
-3. Attach NPM Plus to the new network — uncomment in `services/npm/docker-compose.yml` and redeploy:
+2. Create `services/<name>/docker-compose.yml` (use `services/globaleaks/docker-compose.yml` as the template)
+3. Hot-connect NPM Plus — **no restart needed**:
    ```bash
-   docker compose -f /opt/npm/docker-compose.yml up -d
+   docker network connect <name>-net npm
    ```
 4. In NPM Plus: add a proxy host pointing to `<container>:<port>`
+
+**Teardown** (any isolated service):
+```bash
+docker compose -f /opt/<service>/docker-compose.yml down
+docker network disconnect <name>-net npm
+docker network rm <name>-net
+```
 
 ---
 

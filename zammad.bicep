@@ -252,10 +252,9 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
 usermod -aG docker "${VM_ADMIN}"
 systemctl enable --now docker
 
-# proxy-net  172.20.0.0/24 — shared: NPM Plus, Portainer, Zammad nginx
-# globaleaks-net 172.21.0.0/24 — isolated: GlobaLeaks only (NPM Plus attaches when deployed)
+# proxy-net 172.20.0.0/24 — shared: NPM Plus, Portainer, Zammad nginx
+# Tenant networks (172.21.<n>.0/24) are created on demand by scripts/globaleaks-add-tenant.sh
 docker network create --driver bridge --subnet 172.20.0.0/24 proxy-net 2>/dev/null || true
-docker network create --driver bridge --subnet 172.21.0.0/24 globaleaks-net 2>/dev/null || true
 
 # ── Azure File Shares (SMB 3.0, TLS in transit) ───────────────────────────────
 mkdir -p /mnt/zammad-storage /mnt/zammad-backup /mnt/npm-certs /etc/smbcredentials
@@ -388,6 +387,85 @@ OVERRIDEEOF
 
 docker compose pull
 docker compose up -d
+
+# ── GlobaLeaks per-tenant deploy script ──────────────────────────────────────
+mkdir -p /opt/scripts
+cat > /opt/scripts/globaleaks-add-tenant.sh << 'GLSCRIPTEOF'
+#!/usr/bin/env bash
+# Usage: sudo bash /opt/scripts/globaleaks-add-tenant.sh <tenant-slug>
+set -euo pipefail
+
+TENANT="${1:?Usage: $0 <tenant-slug>}"
+TENANT="${TENANT,,}"
+TENANT="${TENANT//[^a-z0-9-]/}"
+[[ -z "${TENANT}" ]] && { echo "ERROR: invalid slug" >&2; exit 1; }
+
+NET="gl-${TENANT}-net"
+CONTAINER="globaleaks-${TENANT}"
+VOLUME="gl-${TENANT}-data"
+DIR="/opt/globaleaks-${TENANT}"
+
+docker network inspect "${NET}" &>/dev/null && {
+  echo "Network ${NET} already exists. To redeploy: docker compose -f ${DIR}/docker-compose.yml up -d"
+  exit 0
+}
+
+next_octet() {
+  local max=0
+  while IFS= read -r net; do
+    local octet
+    octet=$(docker network inspect "${net}" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null \
+      | grep -oP '172\.21\.\K\d+(?=\.0/)' || true)
+    [[ -n "${octet}" && "${octet}" -gt "${max}" ]] && max="${octet}"
+  done < <(docker network ls --format '{{.Name}}' | grep '^gl-' || true)
+  echo $((max + 1))
+}
+
+N=$(next_octet)
+SUBNET="172.21.${N}.0/24"
+
+echo "Deploying GlobaLeaks for tenant: ${TENANT}"
+echo "  Network:   ${NET} (${SUBNET})"
+echo "  Container: ${CONTAINER}"
+
+docker network create --driver bridge --subnet "${SUBNET}" "${NET}"
+
+mkdir -p "${DIR}"
+cat > "${DIR}/docker-compose.yml" << EOF
+services:
+  ${CONTAINER}:
+    image: globaleaks/globaleaks:latest
+    container_name: ${CONTAINER}
+    restart: unless-stopped
+    volumes:
+      - ${VOLUME}:/var/globaleaks
+    networks:
+      - ${NET}
+
+volumes:
+  ${VOLUME}:
+
+networks:
+  ${NET}:
+    external: true
+EOF
+
+docker compose -f "${DIR}/docker-compose.yml" pull
+docker compose -f "${DIR}/docker-compose.yml" up -d
+
+docker inspect npm &>/dev/null \
+  && docker network connect "${NET}" npm \
+  && echo "NPM Plus connected to ${NET} (no restart needed)." \
+  || echo "WARNING: npm container not found. Run: docker network connect ${NET} npm"
+
+echo ""
+echo "Add a proxy host in NPM Plus (http://localhost:81):"
+echo "  Scheme: http  Hostname: ${CONTAINER}  Port: 8083"
+echo ""
+echo "To remove: docker compose -f ${DIR}/docker-compose.yml down && docker network disconnect ${NET} npm && docker network rm ${NET} && rm -rf ${DIR}"
+GLSCRIPTEOF
+chmod +x /opt/scripts/globaleaks-add-tenant.sh
+
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Setup complete"
 '''
 
