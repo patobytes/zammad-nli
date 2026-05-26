@@ -1,0 +1,30 @@
+services:
+  npm:
+    image: ghcr.io/zoeyvid/npmplus:latest
+    container_name: npm
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "127.0.0.1:81:81"
+    volumes:
+      - npm-data:/data
+      - /mnt/npm-certs:/data/letsencrypt
+    environment:
+      - TZ=America/Sao_Paulo
+    networks:
+      - proxy-net
+      # When deploying an isolated service, attach its network here so NPM Plus
+      # can route to it, then: docker compose -f /opt/npm/docker-compose.yml up -d
+      # - globaleaks-net
+
+volumes:
+  # SQLite db stays on a local volume — CIFS/SMB does not support SQLite file locking.
+  # /data/letsencrypt is on Azure Files (npm-certs share); certs survive VM recreations.
+  npm-data:
+
+networks:
+  proxy-net:
+    external: true
+  # globaleaks-net:
+  #   external: true

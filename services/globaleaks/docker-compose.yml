@@ -1,0 +1,30 @@
+# GlobaLeaks — whistleblowing platform
+#
+# Isolation: globaleaks-net (172.21.0.0/24) only.
+# Zammad cannot reach GlobaLeaks and vice versa — they share no network.
+# NPM Plus routes HTTPS traffic to GlobaLeaks after being attached to globaleaks-net.
+#
+# Before first deploy:
+#   1. globaleaks-net is pre-created by vm-setup.sh with subnet 172.21.0.0/24
+#   2. Uncomment globaleaks-net in services/npm/docker-compose.yml and redeploy npm
+#   3. Add a proxy host in NPM Plus: your-domain → globaleaks:8083
+#   4. Optional: provision /mnt/globaleaks-storage Azure File Share + bind-mount below
+
+services:
+  globaleaks:
+    image: globaleaks/globaleaks:latest
+    container_name: globaleaks
+    restart: unless-stopped
+    # No public ports — NPM Plus routes via globaleaks-net
+    volumes:
+      - globaleaks-data:/var/globaleaks
+    networks:
+      - globaleaks-net
+
+volumes:
+  globaleaks-data:
+    # To persist to Azure Files, replace with a bind-mount to /mnt/globaleaks-storage
+
+networks:
+  globaleaks-net:
+    external: true

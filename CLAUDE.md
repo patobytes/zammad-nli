@@ -11,14 +11,38 @@
 
 ```
 Internet → NSG (22/80/443) → VM
-                               ├── NPM Plus          ports 80/443     reverse proxy + SSL
+                               ├── NPM Plus          :80/:443         reverse proxy + SSL  (proxy-net)
                                ├── Zammad nginx      localhost:8080   via proxy-net only
                                ├── Portainer CE      localhost:9000   via SSH tunnel / proxy-net
-                               └── [future services] proxy-net only
+                               └── GlobaLeaks (planned)               isolated on globaleaks-net
 ```
 
-All services share the `proxy-net` Docker bridge. NPM Plus is the only internet-facing entry point.
-New services (Globaleaks, etc.): put them on `proxy-net`, add a proxy host in NPM Plus.
+NPM Plus is the single internet-facing entry point. Services that must be isolated from each other get their own Docker network; NPM Plus attaches to each network it needs to route to.
+
+### Docker networks
+
+| Network | Subnet | Services |
+|---|---|---|
+| `proxy-net` | `172.20.0.0/24` | NPM Plus, Portainer, zammad-nginx |
+| `globaleaks-net` | `172.21.0.0/24` | GlobaLeaks (isolated from proxy-net) |
+| Zammad default | Docker-assigned | zammad, postgresql, redis, elasticsearch |
+
+Both named networks are pre-created by `vm-setup.sh` with explicit subnets so IPAM assignments are stable. All compose files reference them as `external: true`. To add IPAM later, recreate with `docker network rm <name> && docker network create --driver bridge --subnet <cidr> <name>` (requires restarting affected containers).
+
+**Isolation rule:** services on `globaleaks-net` cannot reach services on `proxy-net` and vice versa. To route traffic from NPM Plus to a service on an isolated network, add that network to NPM Plus's compose file and `docker compose up -d` it.
+
+### Services directory
+
+Each service has a compose file under `services/`:
+
+```
+services/
+  npm/docker-compose.yml          NPM Plus — proxy-net
+  portainer/docker-compose.yml    Portainer CE — proxy-net
+  globaleaks/docker-compose.yml   GlobaLeaks — globaleaks-net (isolated)
+```
+
+`vm-setup.sh` writes these files inline to the VM (the repo is not cloned on the VM). The `services/` files are the canonical source of truth — keep them in sync with the heredocs in `vm-setup.sh` and `zammad.bicep`.
 
 ### Prod resources (Azure, `rg-zmd-brs`, Brazil South)
 
@@ -136,9 +160,11 @@ Alternatively, add a proxy host in NPM Plus pointing to `portainer:9000` on `pro
 
 ---
 
-## Adding new services (e.g. Globaleaks)
+## Adding new services
 
-Template for any new service at `/opt/<service>/docker-compose.yml`:
+### Option A — shared on proxy-net (service can see Zammad)
+
+Add a compose file under `services/<name>/docker-compose.yml` and deploy to `/opt/<name>/`:
 
 ```yaml
 services:
@@ -146,7 +172,6 @@ services:
     image: myimage:latest
     container_name: myservice
     restart: unless-stopped
-    # No public ports — NPM Plus routes externally
     volumes:
       - mydata:/data
     networks:
@@ -161,6 +186,21 @@ networks:
 ```
 
 Then in NPM Plus: add a proxy host pointing to `myservice:<port>`.
+
+### Option B — isolated network (service cannot see Zammad)
+
+Use this for sensitive services like GlobaLeaks. See `services/globaleaks/docker-compose.yml` as the template.
+
+1. The isolated network is pre-created by `vm-setup.sh` (add it there if it doesn't exist yet):
+   ```bash
+   docker network create --driver bridge --subnet 172.2X.0.0/24 <name>-net 2>/dev/null || true
+   ```
+2. Create `services/<name>/docker-compose.yml` with `networks: <name>-net: external: true`
+3. Attach NPM Plus to the new network — uncomment in `services/npm/docker-compose.yml` and redeploy:
+   ```bash
+   docker compose -f /opt/npm/docker-compose.yml up -d
+   ```
+4. In NPM Plus: add a proxy host pointing to `<container>:<port>`
 
 ---
 

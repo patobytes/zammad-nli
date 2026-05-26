@@ -21,6 +21,8 @@ services:
       proxy-net:
         aliases:
           - zammad-nginx-1
+    volumes:
+      - /opt/zammad/nginx-zammad.conf:/etc/nginx/sites-available/default:ro
 
 volumes:
   zammad-storage:

@@ -252,8 +252,10 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
 usermod -aG docker "${VM_ADMIN}"
 systemctl enable --now docker
 
-# Shared bridge — every service joins this; NPM Plus routes between them
-docker network create proxy-net 2>/dev/null || true
+# proxy-net  172.20.0.0/24 — shared: NPM Plus, Portainer, Zammad nginx
+# globaleaks-net 172.21.0.0/24 — isolated: GlobaLeaks only (NPM Plus attaches when deployed)
+docker network create --driver bridge --subnet 172.20.0.0/24 proxy-net 2>/dev/null || true
+docker network create --driver bridge --subnet 172.21.0.0/24 globaleaks-net 2>/dev/null || true
 
 # ── Azure File Shares (SMB 3.0, TLS in transit) ───────────────────────────────
 mkdir -p /mnt/zammad-storage /mnt/zammad-backup /mnt/npm-certs /etc/smbcredentials
@@ -344,6 +346,16 @@ ZAMMAD_HTTP_TYPE=http
 ZAMMAD_FQDN=${ZAMMAD_FQDN}
 ENVEOF
 
+# Copy Zammad's nginx config and fix X-Forwarded-Proto so Rails sees https behind NPM Plus.
+# Zammad nginx sets X-Forwarded-Proto=$scheme, which is 'http' (inner connection).
+# We pass through the original header from NPM Plus instead.
+[ ! -f nginx-zammad.conf ] && docker run --rm --entrypoint cat \
+  $(docker compose config --format json | python3 -c "import sys,json; print(json.load(sys.stdin)['services']['zammad-nginx']['image'])") \
+  /etc/nginx/sites-available/default > nginx-zammad.conf 2>/dev/null || true
+# Fallback: copy from running container
+[ ! -s nginx-zammad.conf ] && docker compose cp zammad-nginx:/etc/nginx/sites-available/default nginx-zammad.conf 2>/dev/null || true
+sed -i 's/proxy_set_header X-Forwarded-Proto \$scheme;/proxy_set_header X-Forwarded-Proto \$http_x_forwarded_proto;/g' nginx-zammad.conf
+
 cat > docker-compose.override.yml << 'OVERRIDEEOF'
 services:
   zammad-nginx:
@@ -352,6 +364,8 @@ services:
       proxy-net:
         aliases:
           - zammad-nginx-1
+    volumes:
+      - /opt/zammad/nginx-zammad.conf:/etc/nginx/sites-available/default:ro
 
 volumes:
   zammad-storage:
