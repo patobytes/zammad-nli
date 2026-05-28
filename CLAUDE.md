@@ -223,6 +223,34 @@ docker network rm <name>-net
 
 ---
 
+## Syncing upstream Zammad updates
+
+This repo forks [zammad/zammad-docker-compose](https://github.com/zammad/zammad-docker-compose).
+The `upstream` remote is already configured. Upstream only ever changes `docker-compose.yml`
+(image bumps, new services) and `.env.dist` (new env vars) — all Azure customizations live in
+separate files and merge cleanly.
+
+```bash
+git fetch upstream
+git merge upstream/master
+```
+
+**Conflicts to expect** (only in `docker-compose.yml`): image version numbers.
+Always take upstream's version — those are patch/security updates.
+
+```bash
+# Accept upstream's image versions for both conflict hunks, then:
+git add docker-compose.yml
+git commit   # merge commit message is pre-filled
+git push origin master
+```
+
+**Why conflicts stay minimal:** production overrides live in `docker-compose.override.prod.yml`,
+not in `docker-compose.yml`. Never edit `docker-compose.yml` directly — put any local changes
+in the override file instead.
+
+---
+
 ## Dev / HML on Proxmox
 
 No Azure resources needed. Run the upstream stack directly:
