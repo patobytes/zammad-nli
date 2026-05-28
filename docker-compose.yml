@@ -57,6 +57,36 @@ x-shared:
       ZAMMAD_PROCESS_DELAYED_COMMUNICATION_INBOUND_JOBS_WORKER_THREADS:
       ZAMMAD_OTRS_IMPORT_READ_TIMEOUT:
       ZAMMAD_OTRS_IMPORT_TOTAL_TIMEOUT:
+      ZAMMAD_HTTP_OPEN_TIMEOUT:
+      ZAMMAD_HTTP_READ_TIMEOUT:
+      ZAMMAD_HTTP_TOTAL_TIMEOUT:
+      ZAMMAD_HTTP_AI_READ_TIMEOUT:
+      ZAMMAD_HTTP_AI_TOTAL_TIMEOUT:
+      ZAMMAD_HTTP_ELASTICSEARCH_READ_TIMEOUT:
+      ZAMMAD_HTTP_ELASTICSEARCH_TOTAL_TIMEOUT:
+      ZAMMAD_HTTP_ELASTICSEARCH_REINDEX_READ_TIMEOUT:
+      ZAMMAD_HTTP_ELASTICSEARCH_REINDEX_TOTAL_TIMEOUT:
+      ZAMMAD_HTTP_IMPORT_ATTACHMENT_READ_TIMEOUT:
+      ZAMMAD_HTTP_IMPORT_ATTACHMENT_TOTAL_TIMEOUT:
+      ZAMMAD_HTTP_WEBHOOK_READ_TIMEOUT:
+      ZAMMAD_HTTP_WEBHOOK_TOTAL_TIMEOUT:
+
+      # Allow disabling individual background services in the scheduler container.
+      ZAMMAD_PROCESS_SESSIONS_JOBS_DISABLE:
+      ZAMMAD_MANAGE_SESSIONS_JOBS_DISABLE:
+      ZAMMAD_PROCESS_SCHEDULED_JOBS_DISABLE:
+      ZAMMAD_PROCESS_DELAYED_JOBS_DISABLE:
+      ZAMMAD_PROCESS_DELAYED_AI_JOBS_DISABLE:
+      ZAMMAD_PROCESS_DELAYED_COMMUNICATION_INBOUND_JOBS_DISABLE:
+
+      ZAMMAD_GRAPHQL_INTROSPECTION:
+      ZAMMAD_AI_API_URL:
+      ZAMMAD_AI_TOKEN:
+      ZAMMAD_UI_BULK_BACKGROUND_UPDATE_THRESHOLD:
+      ZAMMAD_SETTING_TTL:
+      ZAMMAD_SAFE_MODE:
+      ZAMMAD_WEBSOCKET_SESSION_STORE_FORCE_FS_BACKEND:
+      ZAMMAD_RAILSSERVER_PORT:
 
       # ZAMMAD_SESSION_JOBS_CONCURRENT is deprecated, please use ZAMMAD_PROCESS_SESSIONS_JOBS_WORKERS instead.
       ZAMMAD_SESSION_JOBS_CONCURRENT:
@@ -69,7 +99,7 @@ x-shared:
       LETSENCRYPT_HOST:
       LETSENCRYPT_EMAIL:
 
-    image: ${IMAGE_REPO:-ghcr.io/zammad/zammad}:${VERSION:-7.0.1-0024}
+    image: ${IMAGE_REPO:-ghcr.io/zammad/zammad}:${VERSION:-7.0.1-0048}
     restart: ${RESTART:-always}
     volumes:
       - zammad-backup:/var/tmp/zammad:ro  # needed for waiting on restore operations
@@ -89,7 +119,7 @@ services:
     user: 0:0
 
   zammad-elasticsearch:
-    image: elasticsearch:${ELASTICSEARCH_VERSION:-9.3.3}
+    image: elasticsearch:${ELASTICSEARCH_VERSION:-9.4.1}
     restart: ${RESTART:-always}
     volumes:
       - elasticsearch-data:/usr/share/elasticsearch/data
@@ -108,7 +138,7 @@ services:
 
   zammad-memcached:
     command: memcached -m 256M
-    image: memcached:${MEMCACHE_VERSION:-1.6.41-alpine}
+    image: memcached:${MEMCACHE_VERSION:-1.6.42-alpine}
     restart: ${RESTART:-always}
 
   zammad-nginx:
@@ -119,14 +149,15 @@ services:
     ports:
       - "${NGINX_EXPOSE_PORT:-8080}:${NGINX_PORT:-8080}"
     depends_on:
-      - zammad-railsserver
+      zammad-railsserver:
+        condition: service_healthy
 
   zammad-postgresql:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-zammad_production}
       POSTGRES_USER: ${POSTGRES_USER:-zammad}
       POSTGRES_PASSWORD: ${POSTGRES_PASS:-zammad}
-    image: postgres:${POSTGRES_VERSION:-17.9-alpine}
+    image: postgres:${POSTGRES_VERSION:-17.10-alpine}
     restart: ${RESTART:-always}
     volumes:
       - postgresql-data:/var/lib/postgresql/data
@@ -134,9 +165,15 @@ services:
   zammad-railsserver:
     <<: *zammad-service
     command: ["zammad-railsserver"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:${ZAMMAD_RAILSSERVER_PORT:-3000}"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
 
   zammad-redis:
-    image: redis:${REDIS_VERSION:-8.6.2-alpine}
+    image: redis:${REDIS_VERSION:-8.6.3-alpine}
     restart: ${RESTART:-always}
     volumes:
       - redis-data:/data
