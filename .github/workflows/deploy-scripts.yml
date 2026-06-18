@@ -20,31 +20,47 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Sync scripts to VM
+      - name: Ensure rsync on VM
         run: |
-          rsync -av --chmod=u+x \
+          ssh -i ~/.ssh/deploy_key \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "command -v rsync >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq rsync)"
+
+      - name: Sync scripts
+        run: |
+          rsync -av --chmod=Du+x,Fu+x \
             -e "ssh -i ~/.ssh/deploy_key" \
             scripts/ \
             ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/scripts-sync/
 
           ssh -i ~/.ssh/deploy_key \
             ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
-            "sudo rsync -av --chmod=u+x /tmp/scripts-sync/ /opt/scripts/ && rm -rf /tmp/scripts-sync"
+            "sudo mkdir -p /opt/scripts && \
+             sudo rsync -av /tmp/scripts-sync/ /opt/scripts/ && \
+             sudo chmod +x /opt/scripts/*.sh && \
+             rm -rf /tmp/scripts-sync"
 
-      - name: Sync service compose files
+      - name: Sync service templates
+        # Writes to /opt/services/ (reference copies only).
+        # Running stacks live at /opt/<name>/ and are NOT touched here.
+        # .env files are excluded — never overwrite secrets on the VM.
         run: |
           rsync -av \
             -e "ssh -i ~/.ssh/deploy_key" \
-            --exclude=".env*" \
+            --exclude=".env" \
+            --exclude=".env.local" \
             services/ \
             ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/services-sync/
 
           ssh -i ~/.ssh/deploy_key \
             ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
-            "sudo rsync -av /tmp/services-sync/ /opt/services/ && rm -rf /tmp/services-sync"
+            "sudo mkdir -p /opt/services && \
+             sudo rsync -av /tmp/services-sync/ /opt/services/ && \
+             rm -rf /tmp/services-sync"
 
       - name: Verify
         run: |
           ssh -i ~/.ssh/deploy_key \
             ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
-            "echo '=== /opt/scripts ===' && ls -la /opt/scripts/"
+            "echo '=== /opt/scripts ===' && ls -la /opt/scripts/ && \
+             echo '=== /opt/services ===' && find /opt/services -name '*.yml' | sort"

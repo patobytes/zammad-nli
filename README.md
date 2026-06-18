@@ -13,6 +13,11 @@ with Azure infrastructure, production overrides, and a full MSP stack layered on
 ```mermaid
 graph TB
     Browser["🌐 Browser / TRMM Agent"]
+    Dev["💻 Developer push"]
+
+    subgraph gh["⚙️ GitHub Actions"]
+        GHA["deploy-scripts.yml\nscripts/ · services/ changed"]
+    end
 
     subgraph azure["☁️ Azure · Brazil South · rg-zmd-brs"]
 
@@ -22,6 +27,9 @@ graph TB
 
         subgraph vm["🖥️ vm-zmd-brs · Standard_B2ms · Ubuntu 22.04"]
 
+            Scripts["/opt/scripts/\ncpanel-dns-update.sh\ntrmm-setup.sh\nglobaleaks-add-tenant.sh"]
+            Services["/opt/services/\n(template copies)"]
+
             subgraph proxy-net["proxy-net · 172.20.0.0/24"]
                 NPM["🔀 NPM Plus\n:80 :443 · localhost:81"]
                 Portainer["🐳 Portainer CE\nlocalhost:9000"]
@@ -29,7 +37,7 @@ graph TB
             end
 
             subgraph trmm-net["trmm-net · 172.20.2.0/24"]
-                TRMMNginx["🔀 trmm-nginx\nproxy-net ↔ trmm-net bridge"]
+                TRMMNginx["🔀 trmm-nginx\nproxy-net ↔ trmm-net"]
                 TRMMBack["⚙️ trmm-backend"]
                 TRMMWs["🔌 trmm-websockets"]
                 TRMMCelery["⏱️ trmm-celery"]
@@ -58,19 +66,48 @@ graph TB
         end
     end
 
+    Dev -->|"git push master"| gh
+    GHA -->|"rsync scripts/ → /opt/scripts/\nrsync services/ → /opt/services/\n(SSH · port 22)"| NSG
+
     Browser -->|"HTTPS :443"| NSG --> PIP --> NPM
     Browser -->|"NATS TCP :4222\nagent outbound"| NSG --> NATS
+
     NPM -->|"rmm / api-rmm / mesh"| TRMMNginx
     NPM -->|"zammad.domain.com"| ZNginx
     NPM -.->|"hot-connected per tenant"| GL1
+
     TRMMNginx --> TRMMBack & TRMMWs & Mesh
     ZNginx --> ZApp
     ZApp --> PG & Redis & ES
     ZApp -. "CIFS/SMB 3.0" .-> FS1 & FS2
     NPM -. "CIFS/SMB 3.0" .-> FS3
+    Scripts -. "reads secrets" .-> KV
 ```
 
-NPM Plus is the single internet-facing HTTP/HTTPS entry point. NATS (port 4222) is TCP/TLS and connects directly — agents behind NAT at client sites reach it outbound with no client-side firewall changes.
+NPM Plus is the single internet-facing HTTP/HTTPS entry point. NATS (port 4222) is TCP/TLS and bypasses NPM — agents behind NAT at client sites connect outbound with no client-side firewall changes needed.
+
+---
+
+## CI/CD
+
+[`.github/workflows/deploy-scripts.yml`](.github/workflows/deploy-scripts.yml) runs on every push to `master` that changes `scripts/` or `services/`. It rsyncs both directories to the VM over SSH.
+
+**What it touches:**
+
+| Path on VM | Source | Notes |
+|---|---|---|
+| `/opt/scripts/` | `scripts/` | Executable shell scripts; `chmod +x` applied |
+| `/opt/services/` | `services/` | Template compose files only; `.env` files excluded |
+
+**What it never touches:** running stacks at `/opt/zammad/`, `/opt/npm/`, `/opt/portainer/`, `/opt/trmm/`. Scripts and service templates are reference files — no stack is restarted by the workflow.
+
+**Required repository secrets** (Settings → Secrets and variables → Actions):
+
+| Secret | Value |
+|---|---|
+| `VM_SSH_KEY` | Contents of `~/.ssh/zammad_azure` (private key) |
+| `VM_HOST` | `20.226.75.51` |
+| `VM_USER` | `zammadadmin` |
 
 ---
 
@@ -83,7 +120,7 @@ NPM Plus is the single internet-facing HTTP/HTTPS entry point. NATS (port 4222) 
 | `gl-<tenant>-net` | `172.21.<n>.0/24` | One per GlobaLeaks tenant (fully isolated) |
 | Zammad default | Docker-assigned | zammad, postgresql, redis, elasticsearch |
 
-Both `proxy-net` and `trmm-net` are pre-created by `vm-setup.sh`. `trmm-nginx` is the only TRMM container on `proxy-net` — all other TRMM services stay on `trmm-net` only (no path to Zammad or tenant nets).
+Both `proxy-net` and `trmm-net` are pre-created by `vm-setup.sh`. `trmm-nginx` is the only TRMM container on `proxy-net` — all others stay on `trmm-net` (no path to Zammad or tenant nets).
 
 **Isolation rule:** tenant networks have no path to `proxy-net`, `trmm-net`, or each other. NPM Plus is hot-connected to each new tenant network via `docker network connect` — no restart needed.
 
@@ -115,9 +152,9 @@ Both `proxy-net` and `trmm-net` are pre-created by `vm-setup.sh`. `trmm-nginx` i
 | File Share | `zammad-storage` | 100 GB — attachments |
 | File Share | `zammad-backup` | 50 GB — backups |
 | File Share | `npm-certs` | 10 GB — NPM Plus certs + config |
-| **Key Vault** | **`kv-zmd-brs`** | RBAC mode — TRMM secrets + cPanel API creds |
+| **Key Vault** | **`kv-zmd-brs`** | RBAC mode · TRMM secrets + cPanel API creds |
 
-### Key Vault secrets
+### Key Vault secrets (`kv-zmd-brs`)
 
 | Secret | Contents |
 |---|---|
@@ -125,14 +162,18 @@ Both `proxy-net` and `trmm-net` are pre-created by `vm-setup.sh`. `trmm-nginx` i
 | `trmm-postgres-pass` | TRMM PostgreSQL password |
 | `trmm-mesh-pass` | MeshCentral admin password |
 | `cpanel-host` | `http://daserie.com.br:2082` |
-| `cpanel-username` | cPanel account username |
-| `cpanel-api-token` | cPanel API token |
+| `cpanel-username` | cPanel account for `nextlevelinfo.com.br` DNS |
+| `cpanel-api-token` | cPanel UAPI token |
+
+```bash
+# Retrieve a secret
+az account set --subscription 09a573e4-8b7e-4a95-8051-a21f01e0a758
+az keyvault secret show --vault-name kv-zmd-brs --name <name> --query value -o tsv
+```
 
 ---
 
 ## NPM Plus — Proxy Hosts
-
-All public services are routed through NPM Plus. WebSocket support requires the custom nginx block below in the **Advanced** tab of each host.
 
 | Domain | Forward to | Port | SSL |
 |---|---|---|---|
@@ -141,7 +182,7 @@ All public services are routed through NPM Plus. WebSocket support requires the 
 | `api-rmm.nextlevelinfo.com.br` | `trmm-nginx` | 80 | Let's Encrypt |
 | `mesh.nextlevelinfo.com.br` | `trmm-nginx` | 80 | Let's Encrypt |
 
-**Advanced → Custom Nginx config** (paste in all 4 proxy hosts):
+**Advanced → Custom Nginx config** (required on all 4 hosts — NPM Plus has no WebSocket toggle):
 ```nginx
 proxy_http_version 1.1;
 proxy_set_header Upgrade $http_upgrade;
@@ -156,13 +197,12 @@ proxy_set_header X-Forwarded-Proto $scheme;
 
 ## Scripts
 
-| Script | Purpose |
-|---|---|
-| [`scripts/vm-setup.sh`](scripts/vm-setup.sh) | Full VM bootstrap — Docker, networks, Zammad, NPM Plus, Portainer |
-| [`scripts/cpanel-dns-update.sh`](scripts/cpanel-dns-update.sh) | Create/update DNS A records for TRMM subdomains via cPanel UAPI |
-| [`scripts/globaleaks-add-tenant.sh`](scripts/globaleaks-add-tenant.sh) | Provision an isolated GlobaLeaks tenant with auto-allocated subnet |
-| `/opt/scripts/trmm-setup.sh` | Deploy TRMM stack on VM (written by vm-setup.sh, run manually) |
-| `/opt/scripts/cpanel-dns-update.sh` | Same as above, copied to VM by vm-setup.sh |
+| Script | Deployed to VM by | Purpose |
+|---|---|---|
+| [`scripts/vm-setup.sh`](scripts/vm-setup.sh) | Bicep Custom Script Extension (first boot only) | Full VM bootstrap |
+| [`scripts/cpanel-dns-update.sh`](scripts/cpanel-dns-update.sh) | GitHub Actions | Create/update TRMM DNS A records via cPanel UAPI |
+| [`scripts/trmm-setup.sh`](scripts/trmm-setup.sh) | GitHub Actions | Deploy TRMM stack (run manually after DNS) |
+| [`scripts/globaleaks-add-tenant.sh`](scripts/globaleaks-add-tenant.sh) | GitHub Actions | Provision isolated GlobaLeaks tenant |
 
 ---
 
@@ -185,12 +225,11 @@ az deployment sub create `
 ssh -i $env:USERPROFILE\.ssh\zammad_azure zammadadmin@20.226.75.51 'cat /var/log/zammad-setup.log'
 ```
 
-### Deploy Tactical RMM (after initial setup)
+### Deploy Tactical RMM (run once on VM after DNS propagates)
 
 ```bash
 ssh -i ~/.ssh/zammad_azure zammadadmin@20.226.75.51
 
-# Pull secrets from Key Vault and run setup
 export APP_HOST=rmm.nextlevelinfo.com.br
 export API_HOST=api-rmm.nextlevelinfo.com.br
 export MESH_HOST=mesh.nextlevelinfo.com.br
@@ -199,14 +238,13 @@ export MESH_PASS=$(az keyvault secret show --vault-name kv-zmd-brs --name trmm-m
 export POSTGRES_PASS=$(az keyvault secret show --vault-name kv-zmd-brs --name trmm-postgres-pass --query value -o tsv)
 export SECRET_KEY=$(az keyvault secret show --vault-name kv-zmd-brs --name trmm-secret-key --query value -o tsv)
 
-sudo bash /opt/scripts/trmm-setup.sh
+sudo -E bash /opt/scripts/trmm-setup.sh
 ```
 
-### Update DNS (after VM IP changes)
+### Update DNS after VM IP changes
 
 ```bash
 sudo bash /opt/scripts/cpanel-dns-update.sh
-# Reads cPanel credentials from Key Vault automatically
 ```
 
 ---
@@ -220,4 +258,4 @@ git merge upstream/master
 git add docker-compose.yml && git commit
 ```
 
-See [CLAUDE.md](./CLAUDE.md) for full ops guide, SSH tunnel access, HTTPS setup, Intune deployment, and troubleshooting.
+See [CLAUDE.md](./CLAUDE.md) for the full ops guide: SSH tunnels, HTTPS setup, Intune/Entra ID agent deployment, GlobaLeaks tenant provisioning, TRMM Zammad integration, and troubleshooting.
