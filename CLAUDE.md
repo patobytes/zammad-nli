@@ -10,11 +10,13 @@
 ### Service layout (prod VM)
 
 ```
-Internet → NSG (22/80/443) → VM
-                               ├── NPM Plus          :80/:443         reverse proxy + SSL  (proxy-net)
-                               ├── Zammad nginx      localhost:8080   via proxy-net only
-                               ├── Portainer CE      localhost:9000   via SSH tunnel / proxy-net
-                               └── GlobaLeaks tenant-n              isolated on gl-<tenant>-net
+Internet → NSG (22/80/443/4222) → VM
+                                    ├── NPM Plus          :80/:443         reverse proxy + SSL  (proxy-net)
+                                    ├── Zammad nginx      localhost:8080   via proxy-net only
+                                    ├── Portainer CE      localhost:9000   via SSH tunnel / proxy-net
+                                    ├── Tactical RMM      (trmm-nginx bridges proxy-net ↔ trmm-net)
+                                    │     └── NATS agent comms  :4222  direct (TCP/TLS, not via NPM)
+                                    └── GlobaLeaks tenant-n              isolated on gl-<tenant>-net
 ```
 
 NPM Plus is the single internet-facing entry point. Services that must be isolated get their own Docker network; NPM Plus hot-connects to each one via `docker network connect` (no restart needed).
@@ -23,11 +25,12 @@ NPM Plus is the single internet-facing entry point. Services that must be isolat
 
 | Network | Subnet | Services |
 |---|---|---|
-| `proxy-net` | `172.20.0.0/24` | NPM Plus, Portainer, zammad-nginx |
+| `proxy-net` | `172.20.0.0/24` | NPM Plus, Portainer, zammad-nginx, trmm-nginx |
+| `trmm-net` | `172.20.2.0/24` | trmm-nginx + all TRMM internal services |
 | `gl-<tenant>-net` | `172.21.<n>.0/24` | One GlobaLeaks instance per tenant |
 | Zammad default | Docker-assigned | zammad, postgresql, redis, elasticsearch |
 
-`proxy-net` is pre-created by `vm-setup.sh`. Tenant networks are created on demand by `scripts/globaleaks-add-tenant.sh`, auto-incrementing the third octet starting at 1 (`172.21.1.0/24`, `172.21.2.0/24`, …). All compose files reference them as `external: true`.
+`proxy-net` and `trmm-net` are both pre-created by `vm-setup.sh`. Tenant networks are created on demand by `scripts/globaleaks-add-tenant.sh`, auto-incrementing the third octet starting at 1 (`172.21.1.0/24`, `172.21.2.0/24`, …). All compose files reference them as `external: true`.
 
 **Isolation rule:** tenant networks have no path to `proxy-net` or to each other. Tenants can only be reached through NPM Plus, which is hot-connected to each new tenant network on deploy.
 
@@ -41,6 +44,8 @@ Each service has a compose file under `services/`:
 services/
   npm/docker-compose.yml          NPM Plus — proxy-net
   portainer/docker-compose.yml    Portainer CE — proxy-net
+  trmm/docker-compose.yml         Tactical RMM — trmm-net (nginx bridges to proxy-net)
+  trmm/.env.dist                  TRMM environment template
   globaleaks/docker-compose.yml   GlobaLeaks — globaleaks-net (isolated)
 ```
 
@@ -54,7 +59,7 @@ services/
 | Virtual Machine | `vm-zmd-brs` | Standard_B2ms (2 vCPU / 8 GB) |
 | OS Disk | — | Premium SSD, 64 GB |
 | VNet | `vnet-zmd-brs` | 10.0.0.0/16 |
-| NSG | `nsg-zmd-brs` | Ports 22, 80, 443 inbound |
+| NSG | `nsg-zmd-brs` | Ports 22, 80, 443, 4222 inbound |
 | Public IP | `pip-zmd-brs` | Static, Standard SKU |
 | Storage Account | `stzmdbrsvi7puq3ozfbso` | Standard LRS |
 | File Share | `zammad-storage` | 100 GB (attachments) |
@@ -113,10 +118,11 @@ Optional parameters:
 4. VM provisioned (Ubuntu 22.04 LTS, 64 GB Premium SSD)
 5. Custom Script Extension runs `vm-setup.sh`:
    - Installs Docker + Docker Compose
-   - Creates `proxy-net` Docker bridge network
+   - Creates `proxy-net` (172.20.0.0/24) and `trmm-net` (172.20.2.0/24) Docker bridge networks
    - Mounts all three Azure File Shares via CIFS
    - Deploys NPM Plus (ports 80/443), Portainer CE (localhost:9000)
    - Clones Zammad, writes `.env` and `docker-compose.override.yml`, starts stack
+   - Writes `/opt/scripts/trmm-setup.sh` (run manually to deploy TRMM)
 
 ### First access
 ```powershell
@@ -219,6 +225,122 @@ This auto-allocates the next `172.21.<n>.0/24`, creates the network, deploys the
 docker compose -f /opt/<service>/docker-compose.yml down
 docker network disconnect <name>-net npm
 docker network rm <name>-net
+```
+
+---
+
+## Tactical RMM
+
+Remote Monitoring & Management for all client devices. Agents connect **outbound** on port 443 (HTTPS) and 4222 (NATS/TLS) — devices behind NAT at client sites work without any inbound firewall changes on the client side. Only the server needs a public IP.
+
+### Deploy TRMM (first time)
+
+```bash
+# SSH into the VM
+ssh -i ~/.ssh/zammad_azure zammadadmin@<vm-public-ip>
+
+# Set required env vars
+export APP_HOST=rmm.yourdomain.com
+export API_HOST=api.yourdomain.com
+export MESH_HOST=mesh.yourdomain.com
+export MESH_USER=meshcentral
+export MESH_PASS=YourMeshPassword!
+export POSTGRES_PASS=YourTRMMDbPassword!
+export SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(50))")
+
+sudo bash /opt/scripts/trmm-setup.sh
+```
+
+The script:
+1. Writes `/opt/trmm/.env` and `/opt/trmm/docker-compose.yml`
+2. Runs the `tactical-init` container (generates NATS TLS certs, Django config, nginx config)
+3. Starts the full TRMM stack
+4. Hot-connects NPM Plus to `trmm-net`
+5. Prints the NPM Plus proxy host config to the console
+
+### NPM Plus proxy hosts
+
+After running `trmm-setup.sh`, add these three proxy hosts in the NPM Plus admin (`http://localhost:81`):
+
+| Domain | Scheme | Forward Hostname | Port | SSL | WebSockets | Notes |
+|---|---|---|---|---|---|---|
+| `rmm.yourdomain.com` | http | `trmm-nginx` | 80 | Let's Encrypt | Off | TRMM web UI |
+| `api.yourdomain.com` | http | `trmm-nginx` | 80 | Let's Encrypt | **On** | REST API + agent check-in |
+| `mesh.yourdomain.com` | http | `trmm-nginx` | 80 | Let's Encrypt | **On** | MeshCentral remote desktop |
+
+**Advanced tab — Custom Nginx config** (paste into each proxy host):
+
+```nginx
+proxy_set_header Host $host;
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header X-Forwarded-Proto $scheme;
+```
+
+### NATS (port 4222) — Azure NSG
+
+NATS is TCP/TLS and cannot be proxied through NPM Plus. Agents connect directly to `api.yourdomain.com:4222`.
+
+Add an inbound rule to the NSG (`nsg-zmd-brs`):
+```powershell
+az network nsg rule create `
+  --resource-group rg-zmd-brs `
+  --nsg-name nsg-zmd-brs `
+  --name Allow-NATS-Inbound `
+  --priority 310 `
+  --protocol Tcp `
+  --destination-port-ranges 4222 `
+  --access Allow `
+  --direction Inbound
+```
+
+### Intune integration (cloud-managed clients)
+
+For clients with Intune / Entra ID managed devices:
+
+**Deploy TRMM agent via Intune Win32 app:**
+1. Download the agent installer from TRMM: `rmm.yourdomain.com` → Agents → Install Agent → download `.exe`
+2. Package as Win32 app in Intune (`.intunewin` format using `IntuneWinAppUtil.exe`)
+3. Install command: `agent-installer.exe /S`
+4. Detection rule: registry key `HKLM:\SOFTWARE\TacticalRMM`
+5. Assign to all devices or a specific device group
+
+**Azure AD / Entra SSO for TRMM console:**
+TRMM supports Azure AD OIDC. Configure under TRMM Settings → Single Sign-On → Azure AD.
+Your staff log into the TRMM dashboard with their Microsoft account.
+
+### Zammad integration
+
+Auto-create tickets when TRMM fires an alert (offline device, disk full, etc.):
+
+1. In TRMM: Settings → Webhooks → Add webhook
+   - URL: `https://zammad.yourdomain.com/api/v1/tickets`
+   - Method: POST
+   - Headers: `Authorization: Token token=<zammad-api-token>`
+2. Map TRMM alert fields to Zammad ticket fields (title, group, priority)
+3. In TRMM: Automation → Alert → assign the webhook
+
+### Manage TRMM
+
+```bash
+# Logs
+ssh zammadadmin@<ip> 'docker compose -f /opt/trmm/docker-compose.yml logs -f --tail=100'
+
+# Restart stack
+ssh zammadadmin@<ip> 'docker compose -f /opt/trmm/docker-compose.yml restart'
+
+# Update to a new TRMM version
+# Edit /opt/trmm/.env → set TRMM_VERSION=x.y.z, then:
+ssh zammadadmin@<ip> 'docker compose -f /opt/trmm/docker-compose.yml pull && docker compose -f /opt/trmm/docker-compose.yml up -d'
+```
+
+### Remove TRMM
+
+```bash
+docker compose -f /opt/trmm/docker-compose.yml down -v   # -v removes volumes (all data)
+docker network disconnect trmm-net npm
+docker network rm trmm-net
+rm -rf /opt/trmm
 ```
 
 ---
