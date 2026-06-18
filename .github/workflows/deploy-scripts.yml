@@ -1,0 +1,50 @@
+name: Deploy scripts to VM
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "scripts/**"
+      - "services/**"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VM_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Sync scripts to VM
+        run: |
+          rsync -av --chmod=u+x \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            scripts/ \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/scripts-sync/
+
+          ssh -i ~/.ssh/deploy_key \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "sudo rsync -av --chmod=u+x /tmp/scripts-sync/ /opt/scripts/ && rm -rf /tmp/scripts-sync"
+
+      - name: Sync service compose files
+        run: |
+          rsync -av \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            --exclude=".env*" \
+            services/ \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/services-sync/
+
+          ssh -i ~/.ssh/deploy_key \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "sudo rsync -av /tmp/services-sync/ /opt/services/ && rm -rf /tmp/services-sync"
+
+      - name: Verify
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "echo '=== /opt/scripts ===' && ls -la /opt/scripts/"
