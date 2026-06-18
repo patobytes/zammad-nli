@@ -74,6 +74,28 @@ All data (attachments, backups, SSL certs) survives VM deletion and recreation.
 The `npm-certs` share stores NPM Plus `/data` (certs, config). Mount it on any VM to reuse
 the same certificates across services without re-issuing.
 
+### Key Vault
+
+| Name | URI |
+|---|---|
+| `kv-zmd-brs` | `https://kv-zmd-brs.vault.azure.net/` |
+
+Secrets stored:
+
+| Secret name | Contents |
+|---|---|
+| `trmm-secret-key` | Django SECRET_KEY |
+| `trmm-postgres-pass` | TRMM PostgreSQL password |
+| `trmm-mesh-pass` | MeshCentral admin password |
+| `cpanel-host` | cPanel base URL (e.g. `http://daserie.com.br:2082`) |
+| `cpanel-username` | cPanel account username |
+| `cpanel-api-token` | cPanel API token |
+
+Retrieve a secret:
+```bash
+az keyvault secret show --vault-name kv-zmd-brs --name <secret-name> --query value -o tsv
+```
+
 ### Subscription
 `09a573e4-8b7e-4a95-8051-a21f01e0a758` — Microsoft Azure Sponsorship
 
@@ -233,6 +255,19 @@ docker network rm <name>-net
 
 Remote Monitoring & Management for all client devices. Agents connect **outbound** on port 443 (HTTPS) and 4222 (NATS/TLS) — devices behind NAT at client sites work without any inbound firewall changes on the client side. Only the server needs a public IP.
 
+### DNS (automated via cPanel)
+
+DNS A records for `rmm`, `api-rmm`, and `mesh` are managed via the cPanel UAPI at `daserie.com.br`. Credentials live in Key Vault (`kv-zmd-brs`). To update DNS (e.g. after VM recreation with a new IP):
+
+```bash
+sudo bash /opt/scripts/cpanel-dns-update.sh
+# Requires: az CLI authenticated, jq, curl
+# Reads cpanel-host / cpanel-username / cpanel-api-token from Key Vault.
+# Auto-detects VM IP from Azure; override with: TARGET_IP=x.x.x.x sudo bash ...
+```
+
+The script creates records if missing, updates them if they exist.
+
 ### Deploy TRMM (first time)
 
 ```bash
@@ -241,7 +276,7 @@ ssh -i ~/.ssh/zammad_azure zammadadmin@<vm-public-ip>
 
 # Set required env vars
 export APP_HOST=rmm.yourdomain.com
-export API_HOST=api.yourdomain.com
+export API_HOST=api-rmm.yourdomain.com
 export MESH_HOST=mesh.yourdomain.com
 export MESH_USER=meshcentral
 export MESH_PASS=YourMeshPassword!
@@ -262,15 +297,18 @@ The script:
 
 After running `trmm-setup.sh`, add these three proxy hosts in the NPM Plus admin (`http://localhost:81`):
 
-| Domain | Scheme | Forward Hostname | Port | SSL | WebSockets | Notes |
-|---|---|---|---|---|---|---|
-| `rmm.yourdomain.com` | http | `trmm-nginx` | 80 | Let's Encrypt | Off | TRMM web UI |
-| `api.yourdomain.com` | http | `trmm-nginx` | 80 | Let's Encrypt | **On** | REST API + agent check-in |
-| `mesh.yourdomain.com` | http | `trmm-nginx` | 80 | Let's Encrypt | **On** | MeshCentral remote desktop |
+| Domain | Scheme | Forward Hostname | Port | SSL | Notes |
+|---|---|---|---|---|---|
+| `rmm.yourdomain.com` | http | `trmm-nginx` | 80 | Let's Encrypt | TRMM web UI |
+| `api-rmm.yourdomain.com` | http | `trmm-nginx` | 80 | Let's Encrypt | REST API + agent check-in |
+| `mesh.yourdomain.com` | http | `trmm-nginx` | 80 | Let's Encrypt | MeshCentral remote desktop |
 
-**Advanced tab — Custom Nginx config** (paste into each proxy host):
+**Advanced tab — Custom Nginx config** for all three proxy hosts (NPM Plus has no WebSocket toggle — these headers handle WS upgrade and forwarding manually):
 
 ```nginx
+proxy_http_version 1.1;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
 proxy_set_header Host $host;
 proxy_set_header X-Real-IP $remote_addr;
 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

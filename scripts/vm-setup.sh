@@ -264,6 +264,74 @@ echo "To remove: docker compose -f ${DIR}/docker-compose.yml down && docker netw
 GLSCRIPTEOF
 chmod +x /opt/scripts/globaleaks-add-tenant.sh
 
+# ── cPanel DNS update script ─────────────────────────────────────────────────
+cat > /opt/scripts/cpanel-dns-update.sh << 'CPANELEOF'
+#!/usr/bin/env bash
+# cpanel-dns-update.sh — Create/update TRMM DNS A records via cPanel UAPI.
+# Reads credentials from Azure Key Vault (kv-zmd-brs).
+# Usage: sudo bash /opt/scripts/cpanel-dns-update.sh
+# Override IP: TARGET_IP=x.x.x.x sudo bash /opt/scripts/cpanel-dns-update.sh
+set -euo pipefail
+
+KV="kv-zmd-brs"
+ZONE="nextlevelinfo.com.br"
+SUBDOMAINS=("rmm" "api-rmm" "mesh")
+TTL=300
+
+echo "Fetching cPanel credentials from Key Vault ${KV}..."
+CPANEL_HOST=$(az keyvault secret show --vault-name "$KV" --name cpanel-host      --query value -o tsv)
+CPANEL_USER=$(az keyvault secret show --vault-name "$KV" --name cpanel-username  --query value -o tsv)
+CPANEL_TOKEN=$(az keyvault secret show --vault-name "$KV" --name cpanel-api-token --query value -o tsv)
+
+if [[ -z "${TARGET_IP:-}" ]]; then
+  echo "Fetching VM public IP from Azure..."
+  TARGET_IP=$(az vm list-ip-addresses \
+    --resource-group rg-zmd-brs \
+    --query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" -o tsv)
+fi
+echo "Target IP: ${TARGET_IP}"
+
+cpanel_api() {
+  local func="$1"; shift
+  local params=("$@")
+  local url="${CPANEL_HOST}/execute/DNS/${func}"
+  local qs=""
+  for p in "${params[@]}"; do qs+="&${p}"; done
+  curl -s -k -H "Authorization: cpanel ${CPANEL_USER}:${CPANEL_TOKEN}" "${url}?${qs:1}"
+}
+
+echo "Fetching zone records for ${ZONE}..."
+zone_data=$(cpanel_api "parse_zone" "zone=${ZONE}")
+if ! echo "$zone_data" | jq -e '.status == 1' > /dev/null 2>&1; then
+  echo "ERROR: Could not fetch zone. Check cPanel credentials." >&2
+  echo "$zone_data" | jq . >&2; exit 1
+fi
+
+for sub in "${SUBDOMAINS[@]}"; do
+  fqdn="${sub}.${ZONE}."
+  existing_line=$(echo "$zone_data" | jq -r \
+    ".data[] | select(.type == \"A\" and .name == \"${fqdn}\") | .line" 2>/dev/null || true)
+  if [[ -n "$existing_line" ]]; then
+    echo "Updating: ${fqdn} → ${TARGET_IP}"
+    result=$(cpanel_api "edit_zone_record" "zone=${ZONE}" "line=${existing_line}" \
+      "name=${fqdn}" "type=A" "ttl=${TTL}" "address=${TARGET_IP}")
+  else
+    echo "Creating: ${fqdn} → ${TARGET_IP}"
+    result=$(cpanel_api "add_zone_record" "zone=${ZONE}" "name=${sub}" \
+      "type=A" "ttl=${TTL}" "address=${TARGET_IP}")
+  fi
+  if echo "$result" | jq -e '.status == 1' > /dev/null 2>&1; then
+    echo "  OK: ${fqdn}"
+  else
+    echo "  FAIL: ${fqdn}" >&2; echo "$result" | jq . >&2; exit 1
+  fi
+done
+
+echo ""
+echo "DNS updated. Verify: dig +short rmm.${ZONE} api-rmm.${ZONE} mesh.${ZONE}"
+CPANELEOF
+chmod +x /opt/scripts/cpanel-dns-update.sh
+
 # ── Tactical RMM deploy script ────────────────────────────────────────────────
 cat > /opt/scripts/trmm-setup.sh << 'TRMMSCRIPTEOF'
 #!/usr/bin/env bash
