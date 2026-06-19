@@ -1,37 +1,55 @@
 #!/usr/bin/env bash
 # cpanel-dns-update.sh — Create or update TRMM DNS A records via cPanel UAPI.
-# Reads credentials from Azure Key Vault (kv-zmd-brs).
+# Reads credentials from Azure Key Vault (kv-zmd-brs) using the VM's Managed Identity.
+# No az CLI required — uses IMDS token endpoint directly.
 # Safe to re-run: updates records if they already exist.
 #
 # Prerequisites on the VM:
-#   - az CLI authenticated (az login --use-device-code)
+#   - VM must have a system-assigned Managed Identity
+#   - Identity must have "Key Vault Secrets User" role on kv-zmd-brs
 #   - curl, jq
 #
 # Usage:
 #   sudo bash /opt/scripts/cpanel-dns-update.sh
 #
-# To override the target IP (default: fetched from Azure):
+# To override the target IP (default: fetched from IMDS):
 #   TARGET_IP=1.2.3.4 sudo bash /opt/scripts/cpanel-dns-update.sh
 set -euo pipefail
 
 KV="kv-zmd-brs"
+KV_URI="https://${KV}.vault.azure.net"
 ZONE="nextlevelinfo.com.br"
 SUBDOMAINS=("rmm" "api-rmm" "mesh")
 TTL=300
 
-# ── Fetch cPanel credentials from Key Vault ────────────────────────────────────
+# ── Acquire Managed Identity token for Key Vault ──────────────────────────────
+echo "Acquiring Managed Identity token..."
+KV_TOKEN=$(curl -sf \
+  -H "Metadata: true" \
+  "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net" \
+  | jq -r '.access_token')
+[[ -z "$KV_TOKEN" || "$KV_TOKEN" == "null" ]] && { echo "ERROR: Could not get Managed Identity token. Is the VM identity enabled?"; exit 1; }
+
+# ── Fetch a secret from Key Vault via REST ────────────────────────────────────
+kv_secret() {
+  local name="$1"
+  curl -sf \
+    -H "Authorization: Bearer ${KV_TOKEN}" \
+    "${KV_URI}/secrets/${name}?api-version=7.4" \
+    | jq -r '.value'
+}
+
 echo "Fetching cPanel credentials from Key Vault ${KV}..."
-CPANEL_HOST=$(az keyvault secret show --vault-name "$KV" --name cpanel-host     --query value -o tsv)
-CPANEL_USER=$(az keyvault secret show --vault-name "$KV" --name cpanel-username --query value -o tsv)
-CPANEL_TOKEN=$(az keyvault secret show --vault-name "$KV" --name cpanel-api-token --query value -o tsv)
+CPANEL_HOST=$(kv_secret "cpanel-host")
+CPANEL_USER=$(kv_secret "cpanel-username")
+CPANEL_TOKEN=$(kv_secret "cpanel-api-token")
 
 # ── Resolve target IP ─────────────────────────────────────────────────────────
 if [[ -z "${TARGET_IP:-}" ]]; then
-  echo "Fetching VM public IP from Azure..."
-  TARGET_IP=$(az vm list-ip-addresses \
-    --resource-group rg-zmd-brs \
-    --query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" \
-    -o tsv)
+  echo "Fetching public IP from IMDS..."
+  TARGET_IP=$(curl -sf \
+    -H "Metadata: true" \
+    "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text")
 fi
 echo "Target IP: ${TARGET_IP}"
 

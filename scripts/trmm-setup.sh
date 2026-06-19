@@ -69,7 +69,7 @@ cat > "${DIR}/docker-compose.yml" << 'COMPOSEEOF'
 services:
 
   tactical-init:
-    image: amidaware/tactical:${TRMM_VERSION:-latest}
+    image: ghcr.io/amidaware/tactical:${TRMM_VERSION:-latest}
     container_name: trmm-init
     command: ["/bin/bash", "/home/tactical/docker/init.sh"]
     env_file: .env
@@ -83,7 +83,7 @@ services:
     restart: "no"
 
   tactical-backend:
-    image: amidaware/tactical:${TRMM_VERSION:-latest}
+    image: ghcr.io/amidaware/tactical:${TRMM_VERSION:-latest}
     container_name: trmm-backend
     command: ["/bin/bash", "/home/tactical/docker/entrypoints/backend.sh"]
     env_file: .env
@@ -97,7 +97,7 @@ services:
       - tactical-redis
 
   tactical-celery:
-    image: amidaware/tactical:${TRMM_VERSION:-latest}
+    image: ghcr.io/amidaware/tactical:${TRMM_VERSION:-latest}
     container_name: trmm-celery
     command: ["/bin/bash", "/home/tactical/docker/entrypoints/celery.sh"]
     env_file: .env
@@ -111,7 +111,7 @@ services:
       - tactical-redis
 
   tactical-celery-beat:
-    image: amidaware/tactical:${TRMM_VERSION:-latest}
+    image: ghcr.io/amidaware/tactical:${TRMM_VERSION:-latest}
     container_name: trmm-celery-beat
     command: ["/bin/bash", "/home/tactical/docker/entrypoints/celery-beat.sh"]
     env_file: .env
@@ -125,7 +125,7 @@ services:
       - tactical-redis
 
   tactical-websockets:
-    image: amidaware/tactical:${TRMM_VERSION:-latest}
+    image: ghcr.io/amidaware/tactical:${TRMM_VERSION:-latest}
     container_name: trmm-websockets
     command: ["/bin/bash", "/home/tactical/docker/entrypoints/websockets.sh"]
     env_file: .env
@@ -159,7 +159,7 @@ services:
       - trmm-net
 
   tactical-meshcentral:
-    image: amidaware/tactical-meshcentral:${TRMM_VERSION:-latest}
+    image: ghcr.io/amidaware/tactical-meshcentral:${TRMM_VERSION:-latest}
     container_name: trmm-meshcentral
     env_file: .env
     volumes:
