@@ -156,6 +156,8 @@ services:
       MONGODB_USER: ${MONGODB_USER}
       MONGODB_PASSWORD: ${MONGODB_PASSWORD}
       MESH_PERSISTENT_CONFIG: ${MESH_PERSISTENT_CONFIG}
+      NGINX_HOST_IP: "172.23.0.20"
+      NGINX_HOST_PORT: "4443"
     networks:
       trmm-net:
         aliases:
