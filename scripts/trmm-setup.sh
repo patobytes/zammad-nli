@@ -87,7 +87,7 @@ networks:
     ipam:
       driver: default
       config:
-        - subnet: 172.20.3.0/24
+        - subnet: 172.23.0.0/24
   proxy-net:
     external: true
   trmm-api-db:
@@ -306,7 +306,7 @@ services:
       CERT_PRIV_KEY: ""
     networks:
       trmm-net:
-        ipv4_address: 172.20.3.20
+        ipv4_address: 172.23.0.20
       proxy-net: null
     ports:
       - "8181:8080"
