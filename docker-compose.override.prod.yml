@@ -22,6 +22,19 @@ services:
         aliases:
           - zammad-nginx-1
 
+  # The VM has no IPv6 route (IPv4-only public IP). Dual-stack external hosts
+  # (e.g. graph.facebook.com for the WhatsApp channel, login.microsoftonline.com
+  # for the Microsoft 365 channel) can still hand back an AAAA record, which
+  # then fails to connect with "Network is unreachable". Disabling IPv6 inside
+  # these containers keeps glibc's resolver from ever returning/using it.
+  zammad-railsserver:
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+
+  zammad-scheduler:
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+
 volumes:
   zammad-storage:
     driver: local
