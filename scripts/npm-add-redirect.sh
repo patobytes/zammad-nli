@@ -30,10 +30,10 @@ command -v jq >/dev/null || die "jq required"
 COOKIE=$(mktemp)
 trap 'rm -f "$COOKIE"' EXIT
 
-npm_curl() { curl -sf -b "$COOKIE" "$@"; }
+npm_curl() { curl -skfL -b "$COOKIE" "$@"; }
 
 echo "Logging in to NPM Plus API..."
-curl -sf -c "$COOKIE" -X POST "$NPM_API/tokens" \
+curl -skfL -c "$COOKIE" -X POST "$NPM_API/tokens" \
   -H "Content-Type: application/json" \
   -d "{\"identity\":\"$NPM_IDENTITY\",\"secret\":\"$NPM_SECRET\"}" -o /dev/null \
   || die "login failed -- check identity/secret"
