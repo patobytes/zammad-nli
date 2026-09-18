@@ -435,6 +435,25 @@ NPM Plus handles SSL. After first login at `http://localhost:81` (via SSH tunnel
 3. Certs are saved to `/mnt/npm-certs` (Azure Files, persistent across VM recreations)
 4. Update Zammad `.env`: `ZAMMAD_HTTP_TYPE=https`
 
+### Redirecting an old domain to a new one
+
+Use `scripts/npm-add-redirect.sh` instead of the admin UI — it talks to the NPM Plus
+API directly, is create-only (safe to re-run), and reuses whatever certificate NPM
+Plus already has covering the target domain's suffix.
+
+```bash
+sudo bash /opt/scripts/npm-add-redirect.sh <npm-identity> <npm-secret> \
+  <from-domain> <to-domain> [http-code]
+
+# e.g.
+sudo bash /opt/scripts/npm-add-redirect.sh admin@example.com 'S3cr3t!' \
+  chamados.nextlevelinfo.com.br tickets.nextlevelinfo.com.br 301
+```
+
+Can also be run without SSH via `az vm run-command invoke -g rg-zmd-brs -n vm-zmd-brs
+--command-id RunShellScript --scripts @scripts/npm-add-redirect.sh --parameters
+<identity> <secret> <from> <to>` (device-code `az login` — no SSH key needed).
+
 ---
 
 ## Troubleshooting

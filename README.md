@@ -203,6 +203,7 @@ proxy_set_header X-Forwarded-Proto $scheme;
 | [`scripts/cpanel-dns-update.sh`](scripts/cpanel-dns-update.sh) | GitHub Actions | Create/update TRMM DNS A records via cPanel UAPI |
 | [`scripts/trmm-setup.sh`](scripts/trmm-setup.sh) | GitHub Actions | Deploy TRMM stack (run manually after DNS) |
 | [`scripts/globaleaks-add-tenant.sh`](scripts/globaleaks-add-tenant.sh) | GitHub Actions | Provision isolated GlobaLeaks tenant |
+| [`scripts/npm-add-redirect.sh`](scripts/npm-add-redirect.sh) | GitHub Actions | Create a redirection host in NPM Plus via its API (create-only) |
 
 ---
 
