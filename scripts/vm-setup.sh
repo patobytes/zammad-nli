@@ -191,6 +191,29 @@ OVERRIDEEOF
 docker compose pull
 docker compose up -d
 
+# ── Boot-time stack start ────────────────────────────────────────────────────
+# Passing -f disables compose's auto-load of docker-compose.override.yml, so the
+# override must be listed explicitly — otherwise zammad-nginx comes up without
+# proxy-net after a reboot and NPM Plus returns 502.
+cat > /etc/systemd/system/zammad-stack.service << 'UNITEOF'
+[Unit]
+Description=Zammad full stack (NPM Plus, Portainer, Zammad)
+Requires=docker.service
+After=docker.service network-online.target remote-fs.target
+Wants=network-online.target remote-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'docker network create proxy-net 2>/dev/null || true && docker compose -f /opt/npm/docker-compose.yml up -d && docker compose -f /opt/portainer/docker-compose.yml up -d && docker compose -f /opt/zammad/docker-compose.yml -f /opt/zammad/docker-compose.override.yml up -d'
+ExecStop=/bin/bash -c 'docker compose -f /opt/zammad/docker-compose.yml -f /opt/zammad/docker-compose.override.yml down && docker compose -f /opt/portainer/docker-compose.yml down && docker compose -f /opt/npm/docker-compose.yml down'
+
+[Install]
+WantedBy=multi-user.target
+UNITEOF
+systemctl daemon-reload
+systemctl enable zammad-stack.service
+
 # ── GlobaLeaks per-tenant deploy script ──────────────────────────────────────
 mkdir -p /opt/scripts
 cat > /opt/scripts/globaleaks-add-tenant.sh << 'GLSCRIPTEOF'
