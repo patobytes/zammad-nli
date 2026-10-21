@@ -282,6 +282,11 @@ services:
     image: ghcr.io/zoeyvid/npmplus:latest
     container_name: npm
     restart: unless-stopped
+    # nginx fancyindex leaks fds; default 1024 soft limit exhausts in days -> 500s
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     ports:
       - "80:80"
       - "443:443"
